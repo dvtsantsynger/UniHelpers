@@ -62,11 +62,23 @@ namespace UniHelpers.Concurent
                 private object Result;
                 private ExecutorService executor;
                 private Func<object> action;
+                private TaskImpl continuation;
 
                 public TaskImpl(ExecutorService executor, Func<object> action)
                 {
                     this.executor = executor;
                     this.action = action;
+                }
+
+                public TaskImpl SetContinuation<T>(Func<T> action)
+                {
+                    this.continuation = new TaskImpl(executor, () => { return action(); });
+                    return this.continuation;
+                }
+
+                public TaskImpl Continuation()
+                {
+                    return this.continuation;
                 }
 
                 public object Invoke()
@@ -123,6 +135,16 @@ namespace UniHelpers.Concurent
                 public override void Wait(TimeSpan timeout)
                 {
                     manualEvent.WaitOne(timeout.Milliseconds);
+                }
+
+                public override Task ContinueWith<T>(Func<T> action)
+                {
+                    return SetContinuation<T>(action);
+                }
+
+                public override Task ContinueWith(Action action)
+                {
+                    return SetContinuation<Void>(() => { action?.Invoke(); return Void.Empty; });
                 }
             }
 
@@ -268,6 +290,8 @@ namespace UniHelpers.Concurent
                             if (!task.IsCancelled()) {
                                 task.Reset();
                                 task.Set(task.Invoke());
+                                TaskImpl c = task.Continuation();
+                                if (c != null) Push(c);
                             }
                             mScheduled.RemoveFirst();
                         }
@@ -282,6 +306,8 @@ namespace UniHelpers.Concurent
                         {
                             if (!eventWithState.task.IsCancelled()) {
                                 eventWithState.task.Set(eventWithState.task.Invoke());
+                                TaskImpl c = eventWithState.task.Continuation();
+                                if (c != null) Push(c);
                             }
                         }
                         catch (Exception ex) { Debug.LogError(ex); }

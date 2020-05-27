@@ -16,5 +16,9 @@ namespace UniHelpers.Concurent {
         public abstract bool IsCancelled();
 
         public abstract bool IsDone();
+
+        public abstract Task ContinueWith<T>(Func<T> action);
+
+        public abstract Task ContinueWith(Action action);
     }
 }
