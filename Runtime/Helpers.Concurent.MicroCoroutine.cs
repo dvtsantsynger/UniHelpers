@@ -3,7 +3,7 @@ using System.Collections;
 using System.Reflection;
 using UnityEngine;
 
-namespace UniHelpers
+namespace UniHelpers.Concurent
 {
     public abstract class MicroCoroutine
     {
