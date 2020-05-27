@@ -50,76 +50,89 @@ namespace UniHelpers.Concurent
             }, delay, period);
         }
 
-        public static ExecutorService CreateNew() { return new EventLoopThread(); }
+        public static ExecutorService NewThread() { return new EventLoopThread(); }
 
-        private class TaskImpl : Task
-        {
-            public bool InterruptIfRunning { get; private set; }
-            private ManualResetEvent manualEvent = new ManualResetEvent(false);
-            private object Result;
-
-            public void Set(object value)
-            {
-                Result = value;
-                manualEvent.Set();
-            }
-
-            public void Reset()
-            {
-                Result = null;
-                manualEvent.Reset();
-            }
-
-            public override void Cancel(bool interruptIfRunning)
-            {
-                InterruptIfRunning = interruptIfRunning;
-                manualEvent.Dispose();
-                manualEvent = null;
-            }
-
-            public override bool IsCancelled()
-            {
-                return manualEvent == null;
-            }
-
-            public override bool IsDone()
-            {
-                return manualEvent.WaitOne(0);
-            }
-
-            public override T Wait<T>()
-            {
-                manualEvent.WaitOne();
-                return (T)Result;
-            }
-
-            public override T Wait<T>(TimeSpan timeout)
-            {
-                manualEvent.WaitOne(timeout.Milliseconds);
-                return (T)Result;
-            }
-
-            public override void Wait()
-            {
-                manualEvent.WaitOne();
-            }
-
-            public override void Wait(TimeSpan timeout)
-            {
-                manualEvent.WaitOne(timeout.Milliseconds);
-            }
-        }
-
-
-        private struct EventWithState
-        {
-            public Func<object> action;
-            public long time;
-            public TaskImpl task;
-        }
 
         private class EventLoopThread : ExecutorService
         {
+            private class TaskImpl : Task
+            {
+                public bool InterruptIfRunning { get; private set; }
+                private ManualResetEvent manualEvent = new ManualResetEvent(false);
+                private object Result;
+                private ExecutorService executor;
+                private Func<object> action;
+
+                public TaskImpl(ExecutorService executor, Func<object> action)
+                {
+                    this.executor = executor;
+                    this.action = action;
+                }
+
+                public object Invoke()
+                {
+                    return action?.Invoke();
+                }
+
+                public void Set(object value)
+                {
+                    Result = value;
+                    manualEvent.Set();
+                }
+
+                public void Reset()
+                {
+                    Result = null;
+                    manualEvent.Reset();
+                }
+
+                public override void Cancel(bool interruptIfRunning)
+                {
+                    InterruptIfRunning = interruptIfRunning;
+                    manualEvent.Dispose();
+                    manualEvent = null;
+                }
+
+                public override bool IsCancelled()
+                {
+                    return manualEvent == null;
+                }
+
+                public override bool IsDone()
+                {
+                    return manualEvent.WaitOne(0);
+                }
+
+                public override T Wait<T>()
+                {
+                    manualEvent.WaitOne();
+                    return (T)Result;
+                }
+
+                public override T Wait<T>(TimeSpan timeout)
+                {
+                    manualEvent.WaitOne(timeout.Milliseconds);
+                    return (T)Result;
+                }
+
+                public override void Wait()
+                {
+                    manualEvent.WaitOne();
+                }
+
+                public override void Wait(TimeSpan timeout)
+                {
+                    manualEvent.WaitOne(timeout.Milliseconds);
+                }
+            }
+
+
+            private struct EventWithState
+            {
+                public long time;
+                public TaskImpl task;
+            }
+
             [ThreadStatic]
             private static ExecutorService mCurrent;
 
@@ -141,22 +154,19 @@ namespace UniHelpers.Concurent
             public int Count { get { return size; } }
             public int Capacity { get { return mEvents.Length; } }
 
-            protected void addToBuffer(Func<object> action, TaskImpl task)
+            private void addToBuffer(TaskImpl task)
             {
                 size++;
-                mEvents[tail].action = action;
                 mEvents[tail].task = task;
                 mEvents[tail].time = -1;
                 tail = (tail + 1) % Capacity;
             }
 
-            private void PushScheduled(Func<object> action, long time, TaskImpl task)
+            private void PushScheduled(long time, TaskImpl task)
             {
-                if (action == null) return;
                 lock (mForeignLock)
                 {
                     EventWithState e = new EventWithState();
-                    e.action = action;
                     e.time = time;
                     e.task = task;
 
@@ -183,9 +193,8 @@ namespace UniHelpers.Concurent
                 }
             }
 
-            private void Push(Func<object> action, TaskImpl task)
+            private void Push(TaskImpl task)
             {
-                if (action == null) return;
                 lock (mForeignLock)
                 {
                     // If tail & head are equal and the buffer is not empty, assume
@@ -200,12 +209,12 @@ namespace UniHelpers.Concurent
                         }
                         mEvents = _newArray;
                         tail = (head + size) % Capacity;
-                        addToBuffer(action, task);
+                        addToBuffer(task);
                     }
                     // If the buffer would not overflow, just add the item.
                     else
                     {
-                        addToBuffer(action, task);
+                        addToBuffer(task);
                     }
                 }
             }
@@ -258,7 +267,7 @@ namespace UniHelpers.Concurent
                             TaskImpl task = mScheduled.First.Value.task;
                             if (!task.IsCancelled()) {
                                 task.Reset();
-                                task.Set(mScheduled.First.Value.action?.Invoke());
+                                task.Set(task.Invoke());
                             }
                             mScheduled.RemoveFirst();
                         }
@@ -272,7 +281,7 @@ namespace UniHelpers.Concurent
                         try
                         {
                             if (!eventWithState.task.IsCancelled()) {
-                                eventWithState.task.Set(eventWithState.action?.Invoke());
+                                eventWithState.task.Set(eventWithState.task.Invoke());
                             }
                         }
                         catch (Exception ex) { Debug.LogError(ex); }
@@ -288,28 +297,29 @@ namespace UniHelpers.Concurent
 
             public override Task Schedule<T>(Func<T> action)
             {
-                TaskImpl task = new TaskImpl();
-                Push(() => action.Invoke(), task);
+                TaskImpl task = new TaskImpl(this, () => { return action.Invoke(); });
+                Push(task);
                 return task;
             }
 
             public override Task Schedule<T>(Func<T> action, TimeSpan delay)
             {
-                TaskImpl task = new TaskImpl();
-                PushScheduled(() => action.Invoke(), GetCurrentUnixTimestampMillis() + (long)delay.TotalMilliseconds, task);
+                TaskImpl task = new TaskImpl(this, () => { return action.Invoke(); });
+                PushScheduled(GetCurrentUnixTimestampMillis() + (long)delay.TotalMilliseconds, task);
                 return task;
             }
 
             public override Task Schedule<T>(Func<T> action, TimeSpan delay, TimeSpan period)
             {
-                TaskImpl task = new TaskImpl();
                 Func<object> act = null;
+                TaskImpl task = null;
                 act = () => {
                     object ret = action.Invoke();
-                    PushScheduled(act, GetCurrentUnixTimestampMillis() + (long)period.TotalMilliseconds, task);
+                    PushScheduled(GetCurrentUnixTimestampMillis() + (long)period.TotalMilliseconds, task);
                     return ret;
                 };
-                PushScheduled(act, GetCurrentUnixTimestampMillis() + (long)delay.TotalMilliseconds, task);
+                task = new TaskImpl(this, act);
+                PushScheduled(GetCurrentUnixTimestampMillis() + (long)delay.TotalMilliseconds, task);
                 return task;
             }
 
